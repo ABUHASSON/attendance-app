@@ -1,529 +1,454 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  BookOpen,
+  ArrowRight,
   CalendarDays,
-  Database,
+  CheckCircle2,
+  Copy,
   Download,
-  FileSpreadsheet,
-  GraduationCap,
-  Layers,
-  Moon,
+  Filter,
   Plus,
+  Search,
   Share2,
   Sun,
-  Upload,
-  Users,
+  Moon,
+  Trash2,
+  UserPlus,
+  XCircle,
+  Clock,
+  Edit2,
+  MoveVertical,
+  X,
+  Minus,
 } from "lucide-react";
-import type { Section, Student } from "@/types";
+import type { AttendanceStatus, LectureRecord, Section, Student } from "@/types";
 import { normalizeArabic } from "@/lib/normalize";
-import { parseStudentFile, parseRawRows, namesFromColumn, buildJsonBackup, buildExcelBackup } from "@/lib/excel";
-import { saveSection, deleteSection, getAllSections } from "@/lib/db";
-import { shareFile } from "@/lib/share";
+import { getSection, saveSection } from "@/lib/db";
+import { exportSectionReport } from "@/lib/excel";
+import { buildLectureReportText, shareText, copyText } from "@/lib/share";
 import { useTheme } from "@/lib/theme";
-import * as XLSX from "xlsx";
 
 interface Props {
-  onOpenSection: (id: string) => void;
+  sectionId: string;
+  onBack: () => void;
 }
 
-const STAGES = ["الأولى", "الثانية", "الثالثة", "الرابعة"];
+const MAX_PARTICIPATION = 2;
 
-const uid = () =>
-  Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const STATUS_ORDER: AttendanceStatus[] = ["present", "absent", "leave"];
+const STATUS_META: Record<AttendanceStatus, { label: string; icon: React.ReactNode; active: string }> = {
+  present: { label: "حاضر", icon: <CheckCircle2 className="h-4 w-4" />, active: "bg-emerald-500 text-white shadow-sm" },
+  absent: { label: "غائب", icon: <XCircle className="h-4 w-4" />, active: "bg-red-500 text-white shadow-sm" },
+  leave: { label: "إجازة", icon: <Clock className="h-4 w-4" />, active: "bg-amber-500 text-white shadow-sm" },
+};
 
-export default function SetupScreen({ onOpenSection }: Props) {
+function todayISO(): string {
+  const d = new Date();
+  const off = d.getTimezoneOffset();
+  return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+}
+
+export default function ClassroomScreen({ sectionId, onBack }: Props) {
   const [theme, toggleTheme] = useTheme();
-  const [sections, setSections] = useState<Section[]>([]);
+  const [section, setSection] = useState<Section | null>(null);
   const [loading, setLoading] = useState(true);
+  const [lectureDate, setLectureDate] = useState<string>(todayISO());
+  const [query, setQuery] = useState("");
+  const [absentsOnly, setAbsentsOnly] = useState(false);
 
-  const [subject, setSubject] = useState("");
-  const [stage, setStage] = useState<string>("");
-  const [semester, setSemester] = useState<"1" | "2">("1");
-  const [studyType, setStudyType] = useState<"morning" | "evening">("morning");
-  const [totalLectures, setTotalLectures] = useState<string>("");
+  // حالة خيارات الطالب عند الضغط المطول
+  const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
+  const [editName, setEditName] = useState("");
+  const [movePosition, setMovePosition] = useState<number>(1);
+  const [modalMode, setModalMode] = useState<"menu" | "edit" | "move">("menu");
 
-  const [file, setFile] = useState<File | null>(null);
-  const [parsedNames, setParsedNames] = useState<string[]>([]);
-  const [importError, setImportError] = useState<string>("");
-  const [importing, setImporting] = useState(false);
-
-  const [showMapper, setShowMapper] = useState(false);
-  const [mapperHeaders, setMapperHeaders] = useState<string[]>([]);
-  const [mapperRows, setMapperRows] = useState<unknown[][]>([]);
-  const [mapperSelected, setMapperSelected] = useState(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const backupFileInputRef = useRef<HTMLInputElement>(null);
-
-  const loadSections = useCallback(async () => {
+  const loadData = async () => {
     setLoading(true);
-    try {
-      const data = await getAllSections();
-      setSections(data || []);
-    } catch (err) {
-      console.error("Error loading sections:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    const s = await getSection(sectionId);
+    setSection(s ?? null);
+    setLoading(false);
+  };
 
   useEffect(() => {
-    loadSections();
-  }, [loadSections]);
+    loadData();
+  }, [sectionId]);
 
-  const resetForm = () => {
-    setSubject("");
-    setStage("");
-    setSemester("1");
-    setStudyType("morning");
-    setTotalLectures("");
-    setFile(null);
-    setParsedNames([]);
-    setImportError("");
-    if (fileInputRef.current) fileInputRef.current.value = "";
+  const lecture: LectureRecord | null = useMemo(() => {
+    if (!section) return null;
+    return section.lectures.find((l) => l.date === lectureDate) || { date: lectureDate, attendance: {}, participation: {} };
+  }, [section, lectureDate]);
+
+  const scheduleSave = async (updated: Section) => {
+    setSection(updated);
+    await saveSection(updated);
   };
 
-  const handleFile = async (f: File) => {
-    setImporting(true);
-    setImportError("");
-    setParsedNames([]);
-    setFile(f);
-    try {
-      const result = await parseStudentFile(f);
-      if (result.detectedIndex >= 0 && result.names.length > 0) {
-        setParsedNames(result.names);
-      } else if (result.headers.length > 0) {
-        const allRows = await parseRawRows(f);
-        setMapperHeaders(
-          (allRows[0] || []).map((c) => String(c ?? "").trim())
-        );
-        setMapperRows(allRows);
-        setMapperSelected(0);
-        setShowMapper(true);
-      } else if (result.rowCount === 0) {
-        setImportError("الملف فارغ.");
-      } else {
-        setImportError("تعذّر اكتشاف عمود الأسماء. استخدم المحدّد اليدوي.");
-      }
-    } catch {
-      setImportError("حدث خطأ أثناء قراءة الملف. تأكد من صحة التنسيق.");
-    } finally {
-      setImporting(false);
-    }
+  const setStatus = (studentId: string, status: AttendanceStatus) => {
+    if (!section) return;
+    const lectures = [...section.lectures];
+    let idx = lectures.findIndex((l) => l.date === lectureDate);
+    let currentLec: LectureRecord = idx >= 0 ? { ...lectures[idx], attendance: { ...lectures[idx].attendance } } : { date: lectureDate, attendance: {}, participation: {} };
+
+    currentLec.attendance[studentId] = status;
+    if (idx >= 0) lectures[idx] = currentLec;
+    else lectures.push(currentLec);
+
+    scheduleSave({ ...section, lectures });
   };
 
-  const handleSave = async () => {
-    if (!subject.trim() || !stage) {
-      setImportError("يرجى إدخال اسم المادة واختيار المرحلة.");
-      return;
-    }
-    if (parsedNames.length === 0) {
-      setImportError("يرجى استيراد ملف الطلاب أولاً.");
-      return;
-    }
-    const students: Student[] = parsedNames
-      .map((n, i) => ({
-        id: uid(),
-        name: n,
-        normName: normalizeArabic(n),
-        order: i,
-      }))
-      .filter(
-        (s, _i, arr) => arr.findIndex((x) => x.normName === s.normName) === _i
-      );
+  const setParticipation = (studentId: string, delta: number) => {
+    if (!section) return;
+    const lectures = [...section.lectures];
+    let idx = lectures.findIndex((l) => l.date === lectureDate);
+    let currentLec: LectureRecord = idx >= 0 ? { ...lectures[idx], participation: { ...lectures[idx].participation } } : { date: lectureDate, attendance: {}, participation: {} };
 
-    const tl = totalLectures.trim()
-      ? Math.max(1, Math.floor(Number(totalLectures)))
-      : undefined;
+    const currentVal = currentLec.participation[studentId] || 0;
+    const newVal = Math.max(0, Math.min(MAX_PARTICIPATION, currentVal + delta));
+    currentLec.participation[studentId] = newVal;
 
-    const section: Section = {
-      id: uid(),
-      subject: subject.trim(),
-      stage,
-      semester,
-      studyType,
-      createdAt: Date.now(),
-      students,
-      lectures: [],
-      ...(tl ? { totalLectures: tl } : {}),
-    };
-    await saveSection(section);
-    resetForm();
-    await loadSections();
-    onOpenSection(section.id);
+    if (idx >= 0) lectures[idx] = currentLec;
+    else lectures.push(currentLec);
+
+    scheduleSave({ ...section, lectures });
   };
 
-  const handleBackup = async (format: "json" | "excel") => {
-    if (sections.length === 0) {
-      setImportError("لا توجد بيانات لتصديرها.");
-      return;
-    }
-    const file =
-      format === "json"
-        ? buildJsonBackup(sections)
-        : buildExcelBackup(sections);
-    const text = `نسخة احتياطية لنظام الحضور — ${sections.length} شعبة`;
-    await shareFile(file, text, "نسخة احتياطية");
+  // 1. تعديل اسم الطالب
+  const handleRenameStudent = () => {
+    if (!selectedStudent || !section || !editName.trim()) return;
+    const updatedStudents = section.students.map((s) =>
+      s.id === selectedStudent.id
+        ? { ...s, name: editName.trim(), normName: normalizeArabic(editName.trim()) }
+        : s
+    );
+    scheduleSave({ ...section, students: updatedStudents });
+    setSelectedStudent(null);
   };
 
-  // استيراد قاعدة البيانات المحدث بدقة فائقة
-  const handleImportBackup = async (f: File) => {
-    setLoading(true);
-    try {
-      if (f.name.endsWith(".json")) {
-        const text = await f.text();
-        const data = JSON.parse(text);
-        const sectionsArray = Array.isArray(data) ? data : data.sections;
+  // 2. تحريك ترتيب الطالب
+  const handleMoveStudent = () => {
+    if (!selectedStudent || !section) return;
+    const currentIndex = section.students.findIndex((s) => s.id === selectedStudent.id);
+    if (currentIndex === -1) return;
 
-        if (Array.isArray(sectionsArray)) {
-          for (const sec of sectionsArray) {
-            if (sec.id && sec.subject && Array.isArray(sec.students)) {
-              await saveSection(sec);
-            }
-          }
-          // تحديث الحالة فوراً بعد الحفظ
-          const updatedSections = await getAllSections();
-          setSections(updatedSections || []);
-          alert(`تم استيراد ${sectionsArray.length} شعبة بنجاح وظهرت في القائمة!`);
-        } else {
-          alert("تنسيق ملف JSON غير صحيح.");
-        }
-      } else if (f.name.endsWith(".xlsx") || f.name.endsWith(".xls")) {
-        const arrayBuffer = await f.arrayBuffer();
-        const workbook = XLSX.read(arrayBuffer, { type: "array" });
-        
-        let importedCount = 0;
-        for (const sheetName of workbook.SheetNames) {
-          if (sheetName === "الملخص") continue;
-          
-          const worksheet = workbook.Sheets[sheetName];
-          const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet);
-          
-          if (rows.length > 0) {
-            const studentNames = rows
-              .map((r) => String(r["اسم الطالب"] || r["الاسم"] || r["Name"] || Object.values(r)[1] || Object.values(r)[0] || "").trim())
-              .filter((n) => n && n !== "ت" && isNaN(Number(n)) && n.length > 2);
+    const newIndex = Math.max(0, Math.min(section.students.length - 1, movePosition - 1));
+    const updated = [...section.students];
+    const [movedStudent] = updated.splice(currentIndex, 1);
+    updated.splice(newIndex, 0, movedStudent);
 
-            if (studentNames.length > 0) {
-              const students: Student[] = studentNames.map((n, i) => ({
-                id: uid(),
-                name: n,
-                normName: normalizeArabic(n),
-                order: i,
-              }));
-
-              const section: Section = {
-                id: uid(),
-                subject: sheetName,
-                stage: "الأولى",
-                semester: "1",
-                studyType: "morning",
-                createdAt: Date.now(),
-                students,
-                lectures: [],
-              };
-              await saveSection(section);
-              importedCount++;
-            }
-          }
-        }
-        const updatedSections = await getAllSections();
-        setSections(updatedSections || []);
-        alert(`تم استيراد ${importedCount} شعبة من ملف Excel بنجاح!`);
-      }
-    } catch (err) {
-      console.error(err);
-      alert("حدث خطأ أثناء استيراد البيانات.");
-    } finally {
-      setLoading(false);
-      if (backupFileInputRef.current) backupFileInputRef.current.value = "";
-    }
+    const reordered = updated.map((s, idx) => ({ ...s, order: idx }));
+    scheduleSave({ ...section, students: reordered });
+    setSelectedStudent(null);
   };
+
+  const stats = useMemo(() => {
+    if (!section || !lecture) return { present: 0, absent: 0, leave: 0, total: section?.students.length || 0 };
+    let present = 0, absent = 0, leave = 0;
+    section.students.forEach((s) => {
+      const st = lecture.attendance[s.id] ?? "present";
+      if (st === "present") present++;
+      else if (st === "absent") absent++;
+      else if (st === "leave") leave++;
+    });
+    return { present, absent, leave, total: section.students.length };
+  }, [section, lecture]);
+
+  const filteredStudents = useMemo(() => {
+    if (!section) return [];
+    let list = section.students;
+    if (query.trim()) {
+      const q = normalizeArabic(query);
+      list = list.filter((s) => s.normName.includes(q));
+    }
+    if (absentsOnly && lecture) {
+      list = list.filter((s) => (lecture.attendance[s.id] ?? "present") === "absent");
+    }
+    return list;
+  }, [section, query, absentsOnly, lecture]);
+
+  if (loading || !section) return <div className="p-5 text-center text-slate-500">جاري التحميل…</div>;
 
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-900 pb-28">
-      <header className="safe-top bg-gradient-to-b from-primary-800 to-primary-700 text-white shadow-lg">
-        <div className="mx-auto max-w-2xl px-4 py-5">
-          <div className="flex items-center gap-3">
-            <div className="grid h-11 w-11 place-items-center rounded-2xl bg-white/15">
-              <GraduationCap className="h-6 w-6" />
-            </div>
-            <div className="flex-1">
-              <h1 className="text-lg font-bold leading-tight">
-                نظام الحضور والمشاركة
-              </h1>
-              <p className="text-xs text-primary-100">
-                إدارة حضور الطلاب الجامعيين — يعمل بدون إنترنت
-              </p>
-            </div>
-            <button
-              onClick={toggleTheme}
-              className="grid h-10 w-10 place-items-center rounded-2xl bg-white/15 active:scale-95 transition"
-              aria-label="تبديل الوضع الليلي"
-            >
-              {theme === "dark" ? (
-                <Sun className="h-5 w-5" />
-              ) : (
-                <Moon className="h-5 w-5" />
-              )}
-            </button>
+      {/* رأس الصفحة */}
+      <header className="bg-primary-800 text-white p-4 shadow-md">
+        <div className="mx-auto max-w-2xl flex justify-between items-center mb-3">
+          <button onClick={onBack} className="flex items-center gap-1 font-bold text-sm bg-white/10 px-3 py-1.5 rounded-xl">
+            <ArrowRight className="h-4 w-4" /> رجوع
+          </button>
+          <div className="text-left">
+            <h1 className="font-bold text-base">{section.subject}</h1>
+            <p className="text-[11px] text-primary-200">المرحلة {section.stage} • {section.studyType === "morning" ? "صباحي" : "مسائي"}</p>
+          </div>
+        </div>
+
+        {/* إحصائيات الحضور في الأعلى */}
+        <div className="mx-auto max-w-2xl grid grid-cols-4 gap-2 pt-2 border-t border-primary-700">
+          <div className="bg-slate-900/30 rounded-xl p-2 text-center">
+            <span className="block text-xs text-primary-200">الكل</span>
+            <span className="font-bold text-sm">{stats.total}</span>
+          </div>
+          <div className="bg-emerald-600/30 rounded-xl p-2 text-center">
+            <span className="block text-xs text-emerald-200">حاضر</span>
+            <span className="font-bold text-sm text-emerald-300">{stats.present}</span>
+          </div>
+          <div className="bg-red-600/30 rounded-xl p-2 text-center">
+            <span className="block text-xs text-red-200">غائب</span>
+            <span className="font-bold text-sm text-red-300">{stats.absent}</span>
+          </div>
+          <div className="bg-amber-600/30 rounded-xl p-2 text-center">
+            <span className="block text-xs text-amber-200">إجازة</span>
+            <span className="font-bold text-sm text-amber-300">{stats.leave}</span>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-2xl px-4 py-5 space-y-6">
-        <section className="rounded-3xl bg-white dark:bg-slate-800 p-5 shadow-sm animate-slide-up">
-          <div className="mb-4 flex items-center gap-2 text-primary-800 dark:text-primary-300">
-            <Plus className="h-5 w-5" />
-            <h2 className="text-base font-bold">إنشاء شعبة جديدة</h2>
+      <main className="mx-auto max-w-2xl px-4 py-4 space-y-4">
+        {/* شريط تاريخ المحاضرة والبحث */}
+        <div className="bg-white dark:bg-slate-800 p-3 rounded-2xl shadow-sm flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <CalendarDays className="h-4 w-4 text-primary-700" />
+              <span className="text-xs font-bold text-slate-700 dark:text-slate-200">تاريخ المحاضرة:</span>
+            </div>
+            <input
+              type="date"
+              value={lectureDate}
+              onChange={(e) => setLectureDate(e.target.value)}
+              className="bg-slate-100 dark:bg-slate-700 text-xs font-bold px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-600 text-slate-800 dark:text-slate-100"
+            />
           </div>
 
-          <div className="space-y-4">
-            <Field label="اسم المادة" icon={<BookOpen className="h-4 w-4" />}>
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute right-3 top-2.5 h-4 w-4 text-slate-400" />
               <input
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                placeholder="مثال: تشكيل المعادن"
-                className="input dark:input-dark"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="بحث عن اسم الطالب..."
+                className="w-full pl-3 pr-9 py-2 bg-slate-100 dark:bg-slate-700 text-xs rounded-xl border-none text-slate-800 dark:text-slate-100"
               />
-            </Field>
-
-            <Field label="المرحلة / الدرجة" icon={<Layers className="h-4 w-4" />}>
-              <select
-                value={stage}
-                onChange={(e) => setStage(e.target.value)}
-                className="input dark:input-dark"
-              >
-                <option value="" disabled>
-                  اختر المرحلة…
-                </option>
-                {STAGES.map((s) => (
-                  <option key={s} value={s}>
-                    المرحلة {s}
-                  </option>
-                ))}
-              </select>
-            </Field>
-
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="الفصل الدراسي" icon={<CalendarDays className="h-4 w-4" />}>
-                <Segmented
-                  options={[
-                    { value: "1", label: "الأول" },
-                    { value: "2", label: "الثاني" },
-                  ]}
-                  value={semester}
-                  onChange={(v) => setSemester(v as "1" | "2")}
-                />
-              </Field>
-              <Field label="نوع الدراسة" icon={<Sun className="h-4 w-4" />}>
-                <Segmented
-                  options={[
-                    { value: "morning", label: "صباحي", icon: <Sun className="h-3.5 w-3.5" /> },
-                    { value: "evening", label: "مسائي", icon: <Moon className="h-3.5 w-3.5" /> },
-                  ]}
-                  value={studyType}
-                  onChange={(v) => setStudyType(v as "morning" | "evening")}
-                />
-              </Field>
             </div>
-
-            <Field
-              label="عدد المحاضرات الإجمالي (اختياري)"
-              icon={<CalendarDays className="h-4 w-4" />}
-            >
-              <input
-                type="number"
-                min={1}
-                value={totalLectures}
-                onChange={(e) => setTotalLectures(e.target.value)}
-                placeholder="مثال: 30"
-                className="input dark:input-dark"
-              />
-            </Field>
-
-            <div>
-              <p className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
-                <FileSpreadsheet className="h-4 w-4 text-primary-700 dark:text-primary-400" />
-                استيراد قائمة الطلاب
-              </p>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".xlsx,.xls,.csv"
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleFile(f);
-                }}
-              />
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-primary-300 dark:border-primary-600 bg-primary-50 dark:bg-primary-900/30 py-4 text-sm font-semibold text-primary-800 dark:text-primary-300 active:scale-[0.99] transition"
-              >
-                {importing ? "جاري القراءة..." : <><Upload className="h-5 w-5" /> {file ? file.name : "اختر ملف Excel أو CSV"}</>}
-              </button>
-
-              {parsedNames.length > 0 && (
-                <div className="mt-2 flex items-center justify-between rounded-xl bg-emerald-50 dark:bg-emerald-900/30 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">
-                  <span className="flex items-center gap-1.5">
-                    <Users className="h-4 w-4" /> تم العثور على {parsedNames.length} طالب
-                  </span>
-                  <button onClick={() => { setParsedNames([]); setFile(null); }}>إلغاء</button>
-                </div>
-              )}
-            </div>
-
             <button
-              onClick={handleSave}
-              disabled={importing}
-              className="w-full rounded-2xl bg-primary-700 py-3.5 text-sm font-bold text-white shadow-md active:scale-[0.99] transition disabled:opacity-50"
+              onClick={() => setAbsentsOnly(!absentsOnly)}
+              className={`px-3 py-2 text-xs font-bold rounded-xl border transition ${
+                absentsOnly ? "bg-red-500 text-red-100 border-red-500" : "bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-600"
+              }`}
             >
-              حفظ وفتح الشعبة
+              الغائبون
             </button>
           </div>
-        </section>
+        </div>
 
-        {/* عرض الشعب المحفوظة */}
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-700 dark:text-slate-200 flex items-center gap-2">
-              <Layers className="h-4 w-4 text-primary-700" /> الشعب المحفوظة ({sections.length})
-            </h3>
-          </div>
-
-          {loading ? (
-            <p className="text-center text-xs text-slate-500 py-4">جاري تحميل الشعب…</p>
-          ) : sections.length === 0 ? (
-            <p className="text-center text-xs text-slate-500 py-4">لا توجد شعب محفوظة حالياً. قم باستيراد قاعدة بيانات أو إنشاء شعبة جديدة.</p>
+        {/* قائمة الطلاب */}
+        <div className="space-y-2.5">
+          {filteredStudents.length === 0 ? (
+            <p className="text-center text-xs text-slate-500 py-6">لا توجد نتائج مطابقة للبحث.</p>
           ) : (
-            sections.map((sec) => (
-              <div
-                key={sec.id}
-                onClick={() => onOpenSection(sec.id)}
-                className="flex items-center justify-between p-4 rounded-2xl bg-white dark:bg-slate-800 shadow-sm border border-slate-200/60 dark:border-slate-700 cursor-pointer active:scale-[0.99] transition"
-              >
-                <div>
-                  <h4 className="font-bold text-slate-800 dark:text-slate-100 text-base">{sec.subject}</h4>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                    المرحلة {sec.stage} • {sec.studyType === "morning" ? "صباحي" : "مسائي"} • {sec.students.length} طالب
-                  </p>
-                </div>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (confirm(`هل تريد حذف الشعبة "${sec.subject}" نهائياً؟`)) {
-                      deleteSection(sec.id).then(loadSections);
-                    }
+            filteredStudents.map((s, index) => {
+              const currentStatus = lecture?.attendance[s.id] ?? "present";
+              const points = lecture?.participation[s.id] ?? 0;
+
+              return (
+                <StudentRow
+                  key={s.id}
+                  index={section.students.findIndex(st => st.id === s.id) + 1}
+                  student={s}
+                  status={currentStatus}
+                  points={points}
+                  onStatusChange={(st) => setStatus(s.id, st)}
+                  onParticipationChange={(delta) => setParticipation(s.id, delta)}
+                  onLongPress={() => {
+                    setSelectedStudent(s);
+                    setEditName(s.name);
+                    setMovePosition(section.students.findIndex(st => st.id === s.id) + 1);
+                    setModalMode("menu");
                   }}
-                  className="text-red-500 hover:text-red-700 p-2 text-xs font-bold"
-                >
-                  حذف
-                </button>
-              </div>
-            ))
+                />
+              );
+            })
           )}
-        </section>
+        </div>
 
-        {/* إدارة واستيراد قاعدة البيانات */}
-        <section>
-          <div className="mt-4 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-4">
-            <div className="mb-2 flex items-center gap-2 text-slate-700 dark:text-slate-200">
-              <Database className="h-4 w-4" />
-              <h3 className="text-sm font-bold">إدارة واستيراد قاعدة البيانات</h3>
-            </div>
-            <p className="mb-3 text-[11px] text-slate-500 dark:text-slate-400">
-              يمكنك استيراد قاعدة البيانات الكاملة مباشرة من ملف JSON أو ملف Excel الاحتياطي.
-            </p>
-
-            <input
-              ref={backupFileInputRef}
-              type="file"
-              accept=".json,.xlsx,.xls"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) handleImportBackup(f);
-              }}
-            />
-
-            <div className="grid grid-cols-3 gap-2">
+        {/* سجل المحاضرات السابقة */}
+        <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl shadow-sm space-y-2">
+          <h3 className="text-xs font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+            <CalendarDays className="h-4 w-4 text-primary-700" /> سجل المحاضرات ({section.lectures.length})
+          </h3>
+          <div className="flex flex-wrap gap-2 pt-1">
+            {section.lectures.map((l) => (
               <button
-                onClick={() => backupFileInputRef.current?.click()}
-                disabled={loading}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-primary-300 dark:border-primary-600 bg-primary-50 dark:bg-primary-900/40 py-2.5 text-xs font-bold text-primary-800 dark:text-primary-300 active:scale-[0.98]"
+                key={l.date}
+                onClick={() => setLectureDate(l.date)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition ${
+                  l.date === lectureDate
+                    ? "bg-primary-700 text-white border-primary-700"
+                    : "bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-600"
+                }`}
               >
-                <Upload className="h-3.5 w-3.5" />
-                استيراد (JSON/Excel)
+                {l.date}
               </button>
-              <button
-                onClick={() => handleBackup("json")}
-                disabled={loading || sections.length === 0}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 active:scale-[0.98]"
-              >
-                <Share2 className="h-3.5 w-3.5" />
-                تصدير JSON
-              </button>
-              <button
-                onClick={() => handleBackup("excel")}
-                disabled={loading || sections.length === 0}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 active:scale-[0.98]"
-              >
-                <Download className="h-3.5 w-3.5" />
-                تصدير Excel
-              </button>
-            </div>
+            ))}
           </div>
-        </section>
+        </div>
       </main>
 
-      <style>{`
-        .input {
-          width: 100%;
-          border-radius: 0.75rem;
-          border: 1px solid #e2e8f0;
-          background: #f8fafc;
-          padding: 0.6rem 0.75rem;
-          font-size: 0.875rem;
-          outline: none;
-        }
-        .input-dark {
-          border-color: #334155;
-          background: #1e293b;
-          color: #e2e8f0;
-        }
-      `}</style>
+      {/* نافذة خيارات التعديل والتحريك عند الضغط المطول */}
+      {selectedStudent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 animate-fade-in">
+          <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-800 p-5 shadow-xl space-y-4">
+            <div className="flex justify-between items-center border-b pb-3 border-slate-100 dark:border-slate-700">
+              <div>
+                <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100">{selectedStudent.name}</h3>
+                <span className="text-[11px] text-slate-400">خيارات الطالب</span>
+              </div>
+              <button onClick={() => setSelectedStudent(null)} className="p-1 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {modalMode === "menu" && (
+              <div className="space-y-2">
+                <button
+                  onClick={() => setModalMode("edit")}
+                  className="w-full flex items-center gap-3 p-3 rounded-2xl bg-slate-50 dark:bg-slate-700/50 hover:bg-slate-100 font-bold text-xs text-slate-800 dark:text-slate-100 transition"
+                >
+                  <Edit2 className="h-4 w-4 text-primary-600" /> تعديل اسم الطالب
+                </button>
+                <button
+                  onClick={() => setModalMode("move")}
+                  className="w-full flex items-center gap-3 p-3 rounded-2xl bg-slate-50 dark:bg-slate-700/50 hover:bg-slate-100 font-bold text-xs text-slate-800 dark:text-slate-100 transition"
+                >
+                  <MoveVertical className="h-4 w-4 text-amber-600" /> تحريك الترتيب (الموقع الحالي: {section.students.findIndex(s => s.id === selectedStudent.id) + 1})
+                </button>
+              </div>
+            )}
+
+            {modalMode === "edit" && (
+              <div className="space-y-3">
+                <input
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="w-full p-3 rounded-2xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-bold text-slate-800 dark:text-slate-100 outline-none"
+                  placeholder="ادخل الاسم الجديد..."
+                />
+                <button
+                  onClick={handleRenameStudent}
+                  className="w-full py-3 bg-primary-700 text-white font-bold text-xs rounded-2xl shadow-md active:scale-95 transition"
+                >
+                  حفظ الاسم المعدل
+                </button>
+              </div>
+            )}
+
+            {modalMode === "move" && (
+              <div className="space-y-3">
+                <label className="block text-[11px] font-bold text-slate-500">ادخل الموقع الجديد للطالب (من 1 إلى {section.students.length}):</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={section.students.length}
+                  value={movePosition}
+                  onChange={(e) => setMovePosition(Number(e.target.value))}
+                  className="w-full p-3 rounded-2xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-bold text-slate-800 dark:text-slate-100 outline-none"
+                />
+                <button
+                  onClick={handleMoveStudent}
+                  className="w-full py-3 bg-amber-600 text-white font-bold text-xs rounded-2xl shadow-md active:scale-95 transition"
+                >
+                  تأكيد النقل والترتيب
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function Field({ label, icon, children }: { label: string; icon: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
-        <span className="text-primary-700 dark:text-primary-400">{icon}</span>
-        {label}
-      </label>
-      {children}
-    </div>
-  );
-}
+// عنصر الطالب مع أزرار الحضور والمشاركة ودعم الضغط المطول
+function StudentRow({
+  index,
+  student,
+  status,
+  points,
+  onStatusChange,
+  onParticipationChange,
+  onLongPress,
+}: {
+  index: number;
+  student: Student;
+  status: AttendanceStatus;
+  points: number;
+  onStatusChange: (s: AttendanceStatus) => void;
+  onParticipationChange: (delta: number) => void;
+  onLongPress: () => void;
+}) {
+  const timerRef = useRef<number | null>(null);
 
-function Segmented<T extends string>({ options, value, onChange }: { options: { value: T; label: string; icon?: React.ReactNode }[]; value: T; onChange: (v: T) => void }) {
+  const startPress = () => {
+    timerRef.current = window.setTimeout(() => {
+      onLongPress();
+      navigator.vibrate?.(50);
+    }, 600);
+  };
+
+  const cancelPress = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  };
+
   return (
-    <div className="grid grid-flow-col auto-cols-fr gap-1 rounded-xl bg-slate-100 dark:bg-slate-700 p-1">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          onClick={() => onChange(o.value)}
-          className={`flex items-center justify-center gap-1 rounded-lg py-2 text-xs font-bold transition ${
-            value === o.value ? "bg-white dark:bg-slate-600 text-primary-800 dark:text-primary-300 shadow-sm" : "text-slate-500 dark:text-slate-400"
-          }`}
-        >
-          {o.icon}
-          {o.label}
-        </button>
-      ))}
+    <div
+      onTouchStart={startPress}
+      onTouchEnd={cancelPress}
+      onMouseDown={startPress}
+      onMouseUp={cancelPress}
+      className="flex items-center justify-between p-3 rounded-2xl bg-white dark:bg-slate-800 shadow-sm border border-slate-200/50 dark:border-slate-700/60 select-none"
+    >
+      <div className="flex items-center gap-2.5 flex-1 min-w-0">
+        <span className="text-[11px] font-bold text-slate-400 w-5 text-center">{index}</span>
+        <div className="min-w-0 flex-1">
+          <p className="font-bold text-xs text-slate-800 dark:text-slate-100 truncate">{student.name}</p>
+          {/* عداد المشاركات */}
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-[10px] text-primary-700 dark:text-primary-300 font-semibold">مشاركة: {points}/{MAX_PARTICIPATION}</span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={(e) => { e.stopPropagation(); onParticipationChange(-1); }}
+                disabled={points <= 0}
+                className="w-5 h-5 rounded-md bg-slate-100 dark:bg-slate-700 flex items-center justify-center text-[10px] font-bold text-slate-600 dark:text-slate-300 disabled:opacity-40"
+              >
+                -
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onParticipationChange(1); }}
+                disabled={points >= MAX_PARTICIPATION}
+                className="w-5 h-5 rounded-md bg-primary-50 dark:bg-primary-900/40 flex items-center justify-center text-[10px] font-bold text-primary-700 dark:text-primary-300 disabled:opacity-40"
+              >
+                +
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* أزرار حالات الحضور */}
+      <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-700/60 p-1 rounded-xl">
+        {STATUS_ORDER.map((st) => {
+          const active = status === st;
+          const meta = STATUS_META[st];
+          return (
+            <button
+              key={st}
+              onClick={(e) => { e.stopPropagation(); onStatusChange(st); }}
+              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition flex items-center gap-1 ${
+                active ? meta.active : "text-slate-500 dark:text-slate-400 hover:text-slate-800"
+              }`}
+            >
+              {meta.label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
