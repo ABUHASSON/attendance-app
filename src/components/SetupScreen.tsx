@@ -11,10 +11,8 @@ import {
   Plus,
   Share2,
   Sun,
-  Trash2,
   Upload,
   Users,
-  X,
 } from "lucide-react";
 import type { Section, Student } from "@/types";
 import { normalizeArabic } from "@/lib/normalize";
@@ -159,12 +157,6 @@ export default function SetupScreen({ onOpenSection }: Props) {
     onOpenSection(section.id);
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("هل تريد حذف هذا الشعبة وكل بياناته؟")) return;
-    await deleteSection(id);
-    await loadSections();
-  };
-
   const handleBackup = async (format: "json" | "excel") => {
     if (sections.length === 0) {
       setImportError("لا توجد بيانات لتصديرها.");
@@ -178,36 +170,42 @@ export default function SetupScreen({ onOpenSection }: Props) {
     await shareFile(file, text, "نسخة احتياطية");
   };
 
-  // استيراد قاعدة البيانات (JSON أو Excel)
+  // استيراد قاعدة البيانات المحدث والدقيق (JSON أو Excel)
   const handleImportBackup = async (f: File) => {
     setLoading(true);
     try {
       if (f.name.endsWith(".json")) {
         const text = await f.text();
         const data = JSON.parse(text);
-        if (Array.isArray(data)) {
-          for (const sec of data) {
-            if (sec.id && sec.subject && sec.students) {
+        
+        // دعم الصيغة المباشرة أو ملف النسخة الاحتياطية الذي يحتوي على مفتاح sections
+        const sectionsArray = Array.isArray(data) ? data : data.sections;
+
+        if (Array.isArray(sectionsArray)) {
+          for (const sec of sectionsArray) {
+            if (sec.id && sec.subject && Array.isArray(sec.students)) {
               await saveSection(sec);
             }
           }
           await loadSections();
-          alert("تم استيراد قاعدة البيانات من ملف JSON بنجاح!");
+          alert("تم استيراد قاعدة البيانات من ملف JSON بنجاح وظهرت الشعب!");
         } else {
-          alert("تنسيق ملف JSON غير صحيح.");
+          alert("تنسيق ملف JSON غير صحيح أو لا يحتوي على بيانات شعب.");
         }
       } else if (f.name.endsWith(".xlsx") || f.name.endsWith(".xls")) {
         const arrayBuffer = await f.arrayBuffer();
         const workbook = XLSX.read(arrayBuffer, { type: "array" });
         
         for (const sheetName of workbook.SheetNames) {
+          if (sheetName === "الملخص") continue; // تخطي شيت الملخص إن وجد
+          
           const worksheet = workbook.Sheets[sheetName];
           const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet);
           
           if (rows.length > 0) {
             const studentNames = rows
-              .map((r) => String(r["الاسم"] || r["اسم الطالب"] || r["Name"] || Object.values(r)[0] || "").trim())
-              .filter(Boolean);
+              .map((r) => String(r["اسم الطالب"] || r["الاسم"] || r["Name"] || Object.values(r)[1] || Object.values(r)[0] || "").trim())
+              .filter((n) => n && n !== "ت" && isNaN(Number(n) && n.length < 3));
 
             if (studentNames.length > 0) {
               const students: Student[] = studentNames.map((n, i) => ({
@@ -232,18 +230,16 @@ export default function SetupScreen({ onOpenSection }: Props) {
           }
         }
         await loadSections();
-        alert("تم استيراد بيانات الشعب من ملف Excel بنجاح!");
+        alert("تم استيراد الشعب والطلاب من ملف Excel بنجاح!");
       }
-    } catch {
+    } catch (err) {
+      console.error(err);
       alert("حدث خطأ أثناء استيراد البيانات. تأكد من سلامة الملف.");
     } finally {
       setLoading(false);
       if (backupFileInputRef.current) backupFileInputRef.current.value = "";
     }
   };
-
-  const semesterLabel = (s: string) => (s === "1" ? "الأول" : "الثاني");
-  const studyLabel = (s: string) => (s === "morning" ? "صباحي" : "مسائي");
 
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-900 pb-28">
@@ -389,7 +385,48 @@ export default function SetupScreen({ onOpenSection }: Props) {
           </div>
         </section>
 
-        {/* إدارة قاعدة البيانات (JSON / Excel) */}
+        {/* عرض الشعب المحفوظة */}
+        <section className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-slate-700 dark:text-slate-200 flex items-center gap-2">
+              <Layers className="h-4 w-4 text-primary-700" /> الشعب المحفوظة ({sections.length})
+            </h3>
+          </div>
+
+          {loading ? (
+            <p className="text-center text-xs text-slate-500 py-4">جاري تحميل الشعب…</p>
+          ) : sections.length === 0 ? (
+            <p className="text-center text-xs text-slate-500 py-4">لا توجد شعب محفوظة حالياً. قم باستيراد قاعدة بيانات أو إنشاء شعبة جديدة.</p>
+          ) : (
+            sections.map((sec) => (
+              <div
+                key={sec.id}
+                onClick={() => onOpenSection(sec.id)}
+                className="flex items-center justify-between p-4 rounded-2xl bg-white dark:bg-slate-800 shadow-sm border border-slate-200/60 dark:border-slate-700 cursor-pointer active:scale-[0.99] transition"
+              >
+                <div>
+                  <h4 className="font-bold text-slate-800 dark:text-slate-100 text-base">{sec.subject}</h4>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                    المرحلة {sec.stage} • {sec.studyType === "morning" ? "صباحي" : "مسائي"} • {sec.students.length} طالب
+                  </p>
+                </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (confirm(`هل تريد حذف الشعبة "${sec.subject}" نهائياً؟`)) {
+                      deleteSection(sec.id).then(loadSections);
+                    }
+                  }}
+                  className="text-red-500 hover:text-red-700 p-2 text-xs font-bold"
+                >
+                  حذف
+                </button>
+              </div>
+            ))
+          )}
+        </section>
+
+        {/* إدارة واستيراد قاعدة البيانات */}
         <section>
           <div className="mt-4 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-4">
             <div className="mb-2 flex items-center gap-2 text-slate-700 dark:text-slate-200">
@@ -397,7 +434,7 @@ export default function SetupScreen({ onOpenSection }: Props) {
               <h3 className="text-sm font-bold">إدارة واستيراد قاعدة البيانات</h3>
             </div>
             <p className="mb-3 text-[11px] text-slate-500 dark:text-slate-400">
-              يمكنك استيراد قاعدة البيانات المباشرة من ملف JSON أو Excel.
+              يمكنك استيراد قاعدة البيانات الكاملة مباشرة من ملف JSON أو ملف Excel الاحتياطي.
             </p>
 
             <input
