@@ -58,7 +58,10 @@ export default function SetupScreen({ onOpenSection }: Props) {
   const loadSections = useCallback(async () => {
     setLoading(true);
     try {
-      setSections(await getAllSections());
+      const data = await getAllSections();
+      setSections(data || []);
+    } catch (err) {
+      console.error("Error loading sections:", err);
     } finally {
       setLoading(false);
     }
@@ -107,13 +110,6 @@ export default function SetupScreen({ onOpenSection }: Props) {
     } finally {
       setImporting(false);
     }
-  };
-
-  const confirmMapper = () => {
-    const names = namesFromColumn(mapperRows, 0, mapperSelected);
-    setParsedNames(names);
-    setShowMapper(false);
-    if (names.length === 0) setImportError("لا توجد أسماء في العمود المحدد.");
   };
 
   const handleSave = async () => {
@@ -170,15 +166,13 @@ export default function SetupScreen({ onOpenSection }: Props) {
     await shareFile(file, text, "نسخة احتياطية");
   };
 
-  // استيراد قاعدة البيانات المحدث والدقيق (JSON أو Excel)
+  // استيراد قاعدة البيانات المحدث بدقة فائقة
   const handleImportBackup = async (f: File) => {
     setLoading(true);
     try {
       if (f.name.endsWith(".json")) {
         const text = await f.text();
         const data = JSON.parse(text);
-        
-        // دعم الصيغة المباشرة أو ملف النسخة الاحتياطية الذي يحتوي على مفتاح sections
         const sectionsArray = Array.isArray(data) ? data : data.sections;
 
         if (Array.isArray(sectionsArray)) {
@@ -187,17 +181,20 @@ export default function SetupScreen({ onOpenSection }: Props) {
               await saveSection(sec);
             }
           }
-          await loadSections();
-          alert("تم استيراد قاعدة البيانات من ملف JSON بنجاح وظهرت الشعب!");
+          // تحديث الحالة فوراً بعد الحفظ
+          const updatedSections = await getAllSections();
+          setSections(updatedSections || []);
+          alert(`تم استيراد ${sectionsArray.length} شعبة بنجاح وظهرت في القائمة!`);
         } else {
-          alert("تنسيق ملف JSON غير صحيح أو لا يحتوي على بيانات شعب.");
+          alert("تنسيق ملف JSON غير صحيح.");
         }
       } else if (f.name.endsWith(".xlsx") || f.name.endsWith(".xls")) {
         const arrayBuffer = await f.arrayBuffer();
         const workbook = XLSX.read(arrayBuffer, { type: "array" });
         
+        let importedCount = 0;
         for (const sheetName of workbook.SheetNames) {
-          if (sheetName === "الملخص") continue; // تخطي شيت الملخص إن وجد
+          if (sheetName === "الملخص") continue;
           
           const worksheet = workbook.Sheets[sheetName];
           const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet);
@@ -205,7 +202,7 @@ export default function SetupScreen({ onOpenSection }: Props) {
           if (rows.length > 0) {
             const studentNames = rows
               .map((r) => String(r["اسم الطالب"] || r["الاسم"] || r["Name"] || Object.values(r)[1] || Object.values(r)[0] || "").trim())
-              .filter((n) => n && n !== "ت" && isNaN(Number(n) && n.length < 3));
+              .filter((n) => n && n !== "ت" && isNaN(Number(n)) && n.length > 2);
 
             if (studentNames.length > 0) {
               const students: Student[] = studentNames.map((n, i) => ({
@@ -226,15 +223,17 @@ export default function SetupScreen({ onOpenSection }: Props) {
                 lectures: [],
               };
               await saveSection(section);
+              importedCount++;
             }
           }
         }
-        await loadSections();
-        alert("تم استيراد الشعب والطلاب من ملف Excel بنجاح!");
+        const updatedSections = await getAllSections();
+        setSections(updatedSections || []);
+        alert(`تم استيراد ${importedCount} شعبة من ملف Excel بنجاح!`);
       }
     } catch (err) {
       console.error(err);
-      alert("حدث خطأ أثناء استيراد البيانات. تأكد من سلامة الملف.");
+      alert("حدث خطأ أثناء استيراد البيانات.");
     } finally {
       setLoading(false);
       if (backupFileInputRef.current) backupFileInputRef.current.value = "";
