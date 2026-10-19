@@ -35,7 +35,7 @@ export async function getAllSections(): Promise<Section[]> {
 }
 
 export async function getSection(id: string): Promise<Section | null> {
-  if (!id) return null; // حماية تامة ضد تمرير معرف فارغ
+  if (!id) return null; // حماية ضد جلب مفتاح فارغ
   try {
     const db = await openDB();
     return new Promise((resolve, reject) => {
@@ -52,7 +52,7 @@ export async function getSection(id: string): Promise<Section | null> {
 }
 
 export async function saveSection(section: Section): Promise<void> {
-  if (!section || !section.id) return; // حماية ضد البيانات غير الكاملة
+  if (!section || !section.id) return;
   try {
     const db = await openDB();
     return new Promise((resolve, reject) => {
@@ -68,7 +68,7 @@ export async function saveSection(section: Section): Promise<void> {
 }
 
 export async function deleteSection(id: string): Promise<void> {
-  if (!id) return; // حماية ضد الحذف بمفتاح فارغ
+  if (!id) return;
   try {
     const db = await openDB();
     return new Promise((resolve, reject) => {
