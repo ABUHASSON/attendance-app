@@ -22,6 +22,7 @@ import { parseStudentFile, parseRawRows, namesFromColumn, buildJsonBackup, build
 import { saveSection, deleteSection, getAllSections } from "@/lib/db";
 import { shareFile } from "@/lib/share";
 import { useTheme } from "@/lib/theme";
+import * as XLSX from "xlsx";
 
 interface Props {
   onOpenSection: (id: string) => void;
@@ -48,14 +49,12 @@ export default function SetupScreen({ onOpenSection }: Props) {
   const [importError, setImportError] = useState<string>("");
   const [importing, setImporting] = useState(false);
 
-  // Column-mapper modal state
   const [showMapper, setShowMapper] = useState(false);
   const [mapperHeaders, setMapperHeaders] = useState<string[]>([]);
   const [mapperRows, setMapperRows] = useState<unknown[][]>([]);
   const [mapperSelected, setMapperSelected] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  
-  // Backup file input ref for import
+
   const backupFileInputRef = useRef<HTMLInputElement>(null);
 
   const loadSections = useCallback(async () => {
@@ -179,25 +178,64 @@ export default function SetupScreen({ onOpenSection }: Props) {
     await shareFile(file, text, "نسخة احتياطية");
   };
 
+  // استيراد قاعدة البيانات (JSON أو Excel)
   const handleImportBackup = async (f: File) => {
     setLoading(true);
     try {
-      const text = await f.text();
-      const data = JSON.parse(text);
+      if (f.name.endsWith(".json")) {
+        const text = await f.text();
+        const data = JSON.parse(text);
+        if (Array.isArray(data)) {
+          for (const sec of data) {
+            if (sec.id && sec.subject && sec.students) {
+              await saveSection(sec);
+            }
+          }
+          await loadSections();
+          alert("تم استيراد قاعدة البيانات من ملف JSON بنجاح!");
+        } else {
+          alert("تنسيق ملف JSON غير صحيح.");
+        }
+      } else if (f.name.endsWith(".xlsx") || f.name.endsWith(".xls")) {
+        const arrayBuffer = await f.arrayBuffer();
+        const workbook = XLSX.read(arrayBuffer, { type: "array" });
+        
+        for (const sheetName of workbook.SheetNames) {
+          const worksheet = workbook.Sheets[sheetName];
+          const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet);
+          
+          if (rows.length > 0) {
+            const studentNames = rows
+              .map((r) => String(r["الاسم"] || r["اسم الطالب"] || r["Name"] || Object.values(r)[0] || "").trim())
+              .filter(Boolean);
 
-      if (Array.isArray(data)) {
-        for (const sec of data) {
-          if (sec.id && sec.subject && sec.students) {
-            await saveSection(sec);
+            if (studentNames.length > 0) {
+              const students: Student[] = studentNames.map((n, i) => ({
+                id: uid(),
+                name: n,
+                normName: normalizeArabic(n),
+                order: i,
+              }));
+
+              const section: Section = {
+                id: uid(),
+                subject: sheetName,
+                stage: "الأولى",
+                semester: "1",
+                studyType: "morning",
+                createdAt: Date.now(),
+                students,
+                lectures: [],
+              };
+              await saveSection(section);
+            }
           }
         }
         await loadSections();
-        alert("تم استيراد قاعدة البيانات بنجاح!");
-      } else {
-        alert("تنسيق ملف النسخة الاحتياطية غير صحيح.");
+        alert("تم استيراد بيانات الشعب من ملف Excel بنجاح!");
       }
     } catch {
-      alert("حدث خطأ أثناء استيراد قاعدة البيانات. تأكد من صحة ملف JSON.");
+      alert("حدث خطأ أثناء استيراد البيانات. تأكد من سلامة الملف.");
     } finally {
       setLoading(false);
       if (backupFileInputRef.current) backupFileInputRef.current.value = "";
@@ -209,7 +247,6 @@ export default function SetupScreen({ onOpenSection }: Props) {
 
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-900 pb-28">
-      {/* Header */}
       <header className="safe-top bg-gradient-to-b from-primary-800 to-primary-700 text-white shadow-lg">
         <div className="mx-auto max-w-2xl px-4 py-5">
           <div className="flex items-center gap-3">
@@ -240,7 +277,6 @@ export default function SetupScreen({ onOpenSection }: Props) {
       </header>
 
       <main className="mx-auto max-w-2xl px-4 py-5 space-y-6">
-        {/* Setup form card */}
         <section className="rounded-3xl bg-white dark:bg-slate-800 p-5 shadow-sm animate-slide-up">
           <div className="mb-4 flex items-center gap-2 text-primary-800 dark:text-primary-300">
             <Plus className="h-5 w-5" />
@@ -309,14 +345,8 @@ export default function SetupScreen({ onOpenSection }: Props) {
                 placeholder="مثال: 30"
                 className="input dark:input-dark"
               />
-              {totalLectures.trim() && Number(totalLectures) > 0 && (
-                <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-400">
-                  سيتم تفعيل نظام الإنذار عند غياب 10% أو أكثر.
-                </p>
-              )}
             </Field>
 
-            {/* Import */}
             <div>
               <p className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
                 <FileSpreadsheet className="h-4 w-4 text-primary-700 dark:text-primary-400" />
@@ -336,39 +366,16 @@ export default function SetupScreen({ onOpenSection }: Props) {
                 onClick={() => fileInputRef.current?.click()}
                 className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-primary-300 dark:border-primary-600 bg-primary-50 dark:bg-primary-900/30 py-4 text-sm font-semibold text-primary-800 dark:text-primary-300 active:scale-[0.99] transition"
               >
-                {importing ? (
-                  "جاري القراءة..."
-                ) : (
-                  <>
-                    <Upload className="h-5 w-5" />
-                    {file ? file.name : "اختر ملف Excel أو CSV"}
-                  </>
-                )}
+                {importing ? "جاري القراءة..." : <><Upload className="h-5 w-5" /> {file ? file.name : "اختر ملف Excel أو CSV"}</>}
               </button>
 
               {parsedNames.length > 0 && (
-                <div className="mt-2 flex items-center justify-between rounded-xl bg-emerald-50 dark:bg-emerald-900/30 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300 animate-fade-in">
+                <div className="mt-2 flex items-center justify-between rounded-xl bg-emerald-50 dark:bg-emerald-900/30 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">
                   <span className="flex items-center gap-1.5">
-                    <Users className="h-4 w-4" />
-                    تم العثور على {parsedNames.length} طالب
+                    <Users className="h-4 w-4" /> تم العثور على {parsedNames.length} طالب
                   </span>
-                  <button
-                    onClick={() => {
-                      setParsedNames([]);
-                      setFile(null);
-                      if (fileInputRef.current) fileInputRef.current.value = "";
-                    }}
-                    className="text-emerald-700 dark:text-emerald-400 active:opacity-60"
-                  >
-                    إلغاء
-                  </button>
+                  <button onClick={() => { setParsedNames([]); setFile(null); }}>إلغاء</button>
                 </div>
-              )}
-
-              {importError && (
-                <p className="mt-2 rounded-xl bg-red-50 dark:bg-red-900/30 px-3 py-2 text-sm text-red-700 dark:text-red-400">
-                  {importError}
-                </p>
               )}
             </div>
 
@@ -382,108 +389,21 @@ export default function SetupScreen({ onOpenSection }: Props) {
           </div>
         </section>
 
-        {/* Saved sections */}
+        {/* إدارة قاعدة البيانات (JSON / Excel) */}
         <section>
-          <div className="mb-3 flex items-center gap-2 text-slate-700 dark:text-slate-200">
-            <Layers className="h-5 w-5" />
-            <h2 className="text-base font-bold">الشعب المحفوظة</h2>
-            {!loading && (
-              <span className="rounded-full bg-slate-200 dark:bg-slate-700 px-2 py-0.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                {sections.length}
-              </span>
-            )}
-          </div>
-
-          {loading ? (
-            <div className="space-y-3">
-              {[0, 1].map((i) => (
-                <div
-                  key={i}
-                  className="h-24 rounded-2xl bg-white dark:bg-slate-800 animate-pulse"
-                />
-              ))}
-            </div>
-          ) : sections.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-4 py-10 text-center">
-              <Users className="mx-auto mb-2 h-8 w-8 text-slate-300 dark:text-slate-600" />
-              <p className="text-sm text-slate-400 dark:text-slate-500">
-                لا توجد شعب محفوظة بعد. أنشئ شعبة جديدة بالأعلى.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {sections.map((s) => {
-                const lastLecture = s.lectures.length
-                  ? [...s.lectures].sort((a, b) => b.date.localeCompare(a.date))[0]
-                  : null;
-                return (
-                  <article
-                    key={s.id}
-                    className="group rounded-2xl bg-white dark:bg-slate-800 p-4 shadow-sm active:scale-[0.99] transition animate-fade-in"
-                  >
-                    <button
-                      onClick={() => onOpenSection(s.id)}
-                      className="flex w-full items-center gap-3 text-right"
-                    >
-                      <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-primary-100 dark:bg-primary-900/40 text-primary-800 dark:text-primary-300">
-                        <BookOpen className="h-6 w-6" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <h3 className="truncate font-bold text-slate-800 dark:text-slate-100">
-                          {s.subject}
-                        </h3>
-                        <p className="truncate text-xs text-slate-500 dark:text-slate-400">
-                          {s.stage} · {studyLabel(s.studyType)} · فصل {semesterLabel(s.semester)}
-                        </p>
-                        <div className="mt-1 flex flex-wrap gap-1.5">
-                          <Chip icon={<Users className="h-3 w-3" />}>
-                            {s.students.length} طالب
-                          </Chip>
-                          <Chip icon={<CalendarDays className="h-3 w-3" />}>
-                            {s.lectures.length} محاضرة
-                          </Chip>
-                          {s.totalLectures && (
-                            <Chip icon={<Layers className="h-3 w-3" />}>
-                              المجموع: {s.totalLectures}
-                            </Chip>
-                          )}
-                          {lastLecture && (
-                            <Chip icon={<Download className="h-3 w-3" />}>
-                              آخر: {lastLecture.date}
-                            </Chip>
-                          )}
-                        </div>
-                      </div>
-                    </button>
-                    <div className="mt-3 flex justify-end border-t border-slate-100 dark:border-slate-700 pt-2">
-                      <button
-                        onClick={() => handleDelete(s.id)}
-                        className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-semibold text-red-600 dark:text-red-400 active:bg-red-50 dark:active:bg-red-900/30"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        حذف
-                      </button>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Backup & Database Management (Import / Export) */}
           <div className="mt-4 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-4">
             <div className="mb-2 flex items-center gap-2 text-slate-700 dark:text-slate-200">
               <Database className="h-4 w-4" />
-              <h3 className="text-sm font-bold">إدارة قاعدة البيانات</h3>
+              <h3 className="text-sm font-bold">إدارة واستيراد قاعدة البيانات</h3>
             </div>
-            <p className="mb-3 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
-              استيراد أو تصدير نسخة احتياطية كاملة من كل الشعب والمحاضرات لنقلها بين الأجهزة.
+            <p className="mb-3 text-[11px] text-slate-500 dark:text-slate-400">
+              يمكنك استيراد قاعدة البيانات المباشرة من ملف JSON أو Excel.
             </p>
 
             <input
               ref={backupFileInputRef}
               type="file"
-              accept=".json"
+              accept=".json,.xlsx,.xls"
               className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0];
@@ -495,15 +415,15 @@ export default function SetupScreen({ onOpenSection }: Props) {
               <button
                 onClick={() => backupFileInputRef.current?.click()}
                 disabled={loading}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-primary-300 dark:border-primary-600 bg-primary-50 dark:bg-primary-900/40 py-2.5 text-xs font-bold text-primary-800 dark:text-primary-300 active:scale-[0.98] transition disabled:opacity-40"
+                className="flex items-center justify-center gap-1.5 rounded-xl border border-primary-300 dark:border-primary-600 bg-primary-50 dark:bg-primary-900/40 py-2.5 text-xs font-bold text-primary-800 dark:text-primary-300 active:scale-[0.98]"
               >
                 <Upload className="h-3.5 w-3.5" />
-                استيراد JSON
+                استيراد (JSON/Excel)
               </button>
               <button
                 onClick={() => handleBackup("json")}
                 disabled={loading || sections.length === 0}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 active:scale-[0.98] transition disabled:opacity-40"
+                className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 active:scale-[0.98]"
               >
                 <Share2 className="h-3.5 w-3.5" />
                 تصدير JSON
@@ -511,7 +431,7 @@ export default function SetupScreen({ onOpenSection }: Props) {
               <button
                 onClick={() => handleBackup("excel")}
                 disabled={loading || sections.length === 0}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 active:scale-[0.98] transition disabled:opacity-40"
+                className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 active:scale-[0.98]"
               >
                 <Download className="h-3.5 w-3.5" />
                 تصدير Excel
@@ -520,63 +440,6 @@ export default function SetupScreen({ onOpenSection }: Props) {
           </div>
         </section>
       </main>
-
-      {/* Column mapper modal */}
-      {showMapper && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 animate-fade-in">
-          <div className="w-full max-w-2xl rounded-t-3xl bg-white dark:bg-slate-800 p-5 safe-bottom animate-slide-up">
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="font-bold text-slate-800 dark:text-slate-100">تحديد عمود الأسماء</h3>
-              <button
-                onClick={() => setShowMapper(false)}
-                className="rounded-full p-1 text-slate-400 active:bg-slate-100 dark:active:bg-slate-700"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-            <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
-              لم يتم اكتشاف عمود الأسماء تلقائياً. اختر العمود الصحيح من القائمة.
-            </p>
-            <div className="max-h-60 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-700 scrollbar-hide">
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-slate-50 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
-                  <tr>
-                    <th className="p-2 text-right">عمود الأسماء</th>
-                    <th className="p-2 text-right">معاينة أول قيمة</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {mapperHeaders.map((h, i) => {
-                    const preview = String(
-                      (mapperRows[1] && mapperRows[1][i]) ?? ""
-                    ).trim();
-                    return (
-                      <tr
-                        key={i}
-                        onClick={() => setMapperSelected(i)}
-                        className={`border-t border-slate-100 dark:border-slate-700 cursor-pointer ${
-                          mapperSelected === i ? "bg-primary-50 dark:bg-primary-900/30" : ""
-                        }`}
-                      >
-                        <td className="p-2 font-semibold text-slate-700 dark:text-slate-200">
-                          {h || `العمود ${i + 1}`}
-                        </td>
-                        <td className="p-2 text-slate-500 dark:text-slate-400">{preview || "—"}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <button
-              onClick={confirmMapper}
-              className="mt-4 w-full rounded-2xl bg-primary-700 py-3 text-sm font-bold text-white active:scale-[0.99]"
-            >
-              تأكيد واستيراد
-            </button>
-          </div>
-        </div>
-      )}
 
       <style>{`
         .input {
@@ -587,35 +450,18 @@ export default function SetupScreen({ onOpenSection }: Props) {
           padding: 0.6rem 0.75rem;
           font-size: 0.875rem;
           outline: none;
-          transition: border-color .15s, background .15s;
-        }
-        .input:focus {
-          border-color: #0f766e;
-          background: #fff;
         }
         .input-dark {
           border-color: #334155;
           background: #1e293b;
           color: #e2e8f0;
         }
-        .input-dark:focus {
-          border-color: #14b8a6;
-          background: #334155;
-        }
       `}</style>
     </div>
   );
 }
 
-function Field({
-  label,
-  icon,
-  children,
-}: {
-  label: string;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}) {
+function Field({ label, icon, children }: { label: string; icon: React.ReactNode; children: React.ReactNode }) {
   return (
     <div>
       <label className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
@@ -627,15 +473,7 @@ function Field({
   );
 }
 
-function Segmented<T extends string>({
-  options,
-  value,
-  onChange,
-}: {
-  options: { value: T; label: string; icon?: React.ReactNode }[];
-  value: T;
-  onChange: (v: T) => void;
-}) {
+function Segmented<T extends string>({ options, value, onChange }: { options: { value: T; label: string; icon?: React.ReactNode }[]; value: T; onChange: (v: T) => void }) {
   return (
     <div className="grid grid-flow-col auto-cols-fr gap-1 rounded-xl bg-slate-100 dark:bg-slate-700 p-1">
       {options.map((o) => (
@@ -643,9 +481,7 @@ function Segmented<T extends string>({
           key={o.value}
           onClick={() => onChange(o.value)}
           className={`flex items-center justify-center gap-1 rounded-lg py-2 text-xs font-bold transition ${
-            value === o.value
-              ? "bg-white dark:bg-slate-600 text-primary-800 dark:text-primary-300 shadow-sm"
-              : "text-slate-500 dark:text-slate-400"
+            value === o.value ? "bg-white dark:bg-slate-600 text-primary-800 dark:text-primary-300 shadow-sm" : "text-slate-500 dark:text-slate-400"
           }`}
         >
           {o.icon}
@@ -653,20 +489,5 @@ function Segmented<T extends string>({
         </button>
       ))}
     </div>
-  );
-}
-
-function Chip({
-  children,
-  icon,
-}: {
-  children: React.ReactNode;
-  icon?: React.ReactNode;
-}) {
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-700 px-2 py-0.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">
-      {icon}
-      {children}
-    </span>
   );
 }
