@@ -5,7 +5,7 @@ import path from 'path';
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  base: '/', // <-- تجعل المسار مسبوقاً بـ / ليعثر المتصفح على ملفات الـ JS والـ CSS مباشرة
+  base: '', // <-- مسار فارغ لتوليد روابط نسبية صحيحة 100%
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
